@@ -8,6 +8,7 @@ dotenv==0.9.9
 frozenlist==1.8.0
 idna==3.11
 multidict==6.7.1
+Pillow==11.2.1
 propcache==0.4.1
 python-dotenv==1.2.2
 typing_extensions==4.15.0
