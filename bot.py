@@ -24,7 +24,7 @@ intents.message_content = True
 
 
 # this makes the bot listen for commands that start with !
-bot = commands.Bot(command_prefix='!', intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 
 # this keeps track of the game for each user
@@ -85,6 +85,23 @@ async def on_ready():
     print(f"Successfully running, {bot.user.name}")
 
 
+# this shows the user all the commands they can use
+@bot.command()
+async def help(ctx):
+    # make a simple help menu so users can see every command quickly
+    embed = discord.Embed(
+        title="Pokémon trivia commands",
+        description="Here are the commands you can use in the game."
+    )
+    # each field is one command with a short explanation
+    embed.add_field(name="!start", value="start a new pokémon trivia game.", inline=False)
+    embed.add_field(name="!guess <name>", value="submit your guess for the current pokémon.", inline=False)
+    embed.add_field(name="!hint", value="get the next hint for your current game.", inline=False)
+    embed.add_field(name="!end", value="end your current game and reveal the answer.", inline=False)
+    embed.add_field(name="!help", value="show this command list.", inline=False)
+    await ctx.send(embed=embed)
+
+
 # this command starts the game
 @bot.command()
 async def start(ctx):
@@ -127,6 +144,7 @@ async def start(ctx):
                 await ctx.send("Could not build the silhouette image. Try again.")
                 return
 
+            # build the list of hints before the game starts
             hints = build_hints(pokemon_data, species_data)
 
             # save the answer, image, and guesses for this user
@@ -147,7 +165,7 @@ async def start(ctx):
             silhouette_file = discord.File(silhouette_bytes, filename="silhouette.png")
             embed.set_image(url="attachment://silhouette.png")
             await ctx.send(file=silhouette_file, embed=embed)
-            await ctx.send(f"{ctx.author.mention}, your trivia game has started! Use `!guess <name>` to answer, `!hint` for help, or `!end` to stop your game.")
+            await ctx.send(f"{ctx.author.mention}, your trivia game has started! Use `!guess <name>` to answer, `!hint` for assistance, or `!end` to stop your game.")
 
 
 # this gives the next hint to the user
@@ -160,10 +178,12 @@ async def hint(ctx):
         await ctx.send(f"{ctx.author.mention}, you don't have a game running. Start one with `!start`.")
         return
 
+    # stop once the user has already seen every hint
     if game["hint_index"] >= len(game["hints"]):
         await ctx.send(f"{ctx.author.mention}, you already used all the hints for this pokémon.")
         return
 
+    # send the next hint and move the counter forward
     next_hint = game["hints"][game["hint_index"]]
     game["hint_index"] += 1
     await ctx.send(f"{ctx.author.mention}, {next_hint}")
@@ -182,9 +202,10 @@ async def guess(ctx, *, user_guess: str):
     game["guesses"] += 1
     # check if the guess is right
     if user_guess.lower().strip() == game["answer"]:
+        # reveal the normal artwork once the user gets it right
         reveal_embed = discord.Embed(
             title="Correct!",
-            description=f"the answer was **{game['display_name']}**."
+            description=f"The answer was **{game['display_name']}**."
         )
         reveal_embed.set_image(url=game["image_url"])
         await ctx.send(embed=reveal_embed)
@@ -201,10 +222,13 @@ async def end(ctx):
     game = games.get(user_id)
     if game:
         answer = game["display_name"]
+        # remove the game first so the user can start a new one right away
         del games[user_id]
+
+        # show the real image when the game is ended
         reveal_embed = discord.Embed(
             title="Game Ended",
-            description=f"the pokémon was **{answer}**."
+            description=f"The pokémon was **{answer}**."
         )
         reveal_embed.set_image(url=game["image_url"])
         await ctx.send(embed=reveal_embed)
