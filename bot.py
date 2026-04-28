@@ -8,6 +8,7 @@ import random
 import aiohttp
 from io import BytesIO
 from PIL import Image
+import sqlite3
 
 
 # this loads the secret token for the bot from a file
@@ -31,6 +32,35 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 # it remembers the answer, the image, and how many guesses
 games = {}
 
+# this is our database name to connect to, it wioll be our local SQLite db for saving users high scores 
+DB_NAME = "leaderboard.db"
+
+# this function initializes the table for score tracking if it is not yet initialized
+def init_database():
+    # make db connection
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+
+    # if the table doesnt exist yet, we make the table to store the discord username, server name, and their high score
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS leaderboard (
+            discord_user_id TEXT NOT NULL,
+            server_id TEXT NOT NULL,
+            high_score INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (discord_user_id, server_id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+# this is the logic function for getting the score from a round
+# starting from 100, every guess after the first is 10 points off, and every hint used is 5 points off
+def calculate_score(guesses, hints_used):
+    score = 100
+    score -= (guesses - 1) * 10
+    score -= hints_used * 5
+    return max(score, 10)
 
 # this turns the pokemon artwork into a black silhouette
 async def make_silhouette(session, image_url):
@@ -98,6 +128,7 @@ async def help(ctx):
     embed.add_field(name="!guess <name>", value="submit your guess for the current pokémon.", inline=False)
     embed.add_field(name="!hint", value="get the next hint for your current game.", inline=False)
     embed.add_field(name="!end", value="end your current game and reveal the answer.", inline=False)
+    embed.add_field(name="!leaderboard", value="show the Pokémon trivia leaderboard.", inline=False)
     embed.add_field(name="!help", value="show this command list.", inline=False)
     await ctx.send(embed=embed)
 
@@ -214,6 +245,15 @@ async def guess(ctx, *, user_guess: str):
     else:
         await ctx.send(f"❌ Incorrect, {ctx.author.mention}! Try again. **(Guesses: {game['guesses']})**")
 
+# this command will show the leaderboard
+@bot.command()
+async def leaderboard(ctx):
+    # for now, just testing an output, no query logic implimented yet
+    await ctx.send(
+        "🏆 **Pokémon Trivia Bot Leaderboard**\n"
+        "TESTING OUTPUT\n"
+        "This is just a placeholder for the queried results to be implimented"
+    )
 
 # this command ends the game and shows the answer
 @bot.command()
@@ -236,6 +276,8 @@ async def end(ctx):
     else:
         await ctx.send(f"{ctx.author.mention}, you don't have a game running.")
 
+# this sets up the database before the bot starts
+init_database()
 
 # this starts the bot
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
