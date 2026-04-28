@@ -54,10 +54,17 @@ def init_database():
     conn.commit()
     conn.close()
 
+# base scores per difficulty
+DIFFICULTY_BASE_SCORES = {
+    "easy": 100,
+    "medium": 150,
+    "hard": 200,
+}
+
 # this is the logic function for getting the score from a round
-# starting from 100, every guess after the first is 10 points off, and every hint used is 5 points off
-def calculate_score(guesses, hints_used):
-    score = 100
+# starting from the difficulty base, every guess after the first is 10 points off, and every hint used is 5 points off
+def calculate_score(guesses, hints_used, difficulty="easy"):
+    score = DIFFICULTY_BASE_SCORES.get(difficulty, 100)
     score -= (guesses - 1) * 10
     score -= hints_used * 5
     return max(score, 10)
@@ -124,7 +131,7 @@ async def help(ctx):
         description="Here are the commands you can use in the game."
     )
     # each field is one command with a short explanation
-    embed.add_field(name="!start", value="start a new pokémon trivia game.", inline=False)
+    embed.add_field(name="!start [difficulty]", value="start a new pokémon trivia game. difficulty can be `easy` (gen 1), `medium` (gen 1-3), or `hard` (all gens). defaults to `easy`.", inline=False)
     embed.add_field(name="!guess <name>", value="submit your guess for the current pokémon.", inline=False)
     embed.add_field(name="!hint", value="get the next hint for your current game.", inline=False)
     embed.add_field(name="!end", value="end your current game and reveal the answer.", inline=False)
@@ -133,16 +140,29 @@ async def help(ctx):
     await ctx.send(embed=embed)
 
 
+# difficulty ranges based on generation
+DIFFICULTY_RANGES = {
+    "easy": (1, 151),    # gen 1
+    "medium": (1, 386),  # gen 1-3
+    "hard": (1, 1025),   # all gens
+}
+
 # this command starts the game
 @bot.command()
-async def start(ctx):
+async def start(ctx, difficulty: str = "easy"):
     user_id = ctx.author.id
     # if a game is already running for this user, don't start a new one
     if user_id in games:
         await ctx.send(f"{ctx.author.mention}, you already have a game running! Use `!end` to stop it.")
         return
-    # pick a random pokemon from the first 151
-    poke_id = random.randint(1, 151)
+
+    difficulty = difficulty.lower()
+    if difficulty not in DIFFICULTY_RANGES:
+        await ctx.send(f"{ctx.author.mention}, invalid difficulty. Choose `easy`, `medium`, or `hard`.")
+        return
+
+    poke_min, poke_max = DIFFICULTY_RANGES[difficulty]
+    poke_id = random.randint(poke_min, poke_max)
     async with aiohttp.ClientSession() as session:
         # this api is for the actual pokemon data like types and the image
         async with session.get(f'https://pokeapi.co/api/v2/pokemon/{poke_id}') as pokemon_resp:
@@ -186,6 +206,7 @@ async def start(ctx):
                 "guesses": 0,
                 "hint_index": 0,
                 "hints": hints,
+                "difficulty": difficulty,
             }
 
             # make a message with the picture
@@ -196,7 +217,7 @@ async def start(ctx):
             silhouette_file = discord.File(silhouette_bytes, filename="silhouette.png")
             embed.set_image(url="attachment://silhouette.png")
             await ctx.send(file=silhouette_file, embed=embed)
-            await ctx.send(f"{ctx.author.mention}, your trivia game has started! Use `!guess <name>` to answer, `!hint` for assistance, or `!end` to stop your game.")
+            await ctx.send(f"{ctx.author.mention}, your trivia game has started! Difficulty: **{difficulty.capitalize()}**. Use `!guess <name>` to answer, `!hint` for assistance, or `!end` to stop your game.")
 
 
 # this gives the next hint to the user
@@ -231,16 +252,19 @@ async def guess(ctx, *, user_guess: str):
         return
     # add 1 to the number of guesses
     game["guesses"] += 1
-    # check if the guess is right
-    if user_guess.lower().strip() == game["answer"]:
+    # normalize guess and answer for comparison (remove spaces and hyphens, lowercase)
+    def normalize(text):
+        return text.lower().replace(" ", "").replace("-", "")
+    if normalize(user_guess) == normalize(game["answer"]):
         # reveal the normal artwork once the user gets it right
         reveal_embed = discord.Embed(
             title="Correct!",
             description=f"The answer was **{game['display_name']}**."
         )
         reveal_embed.set_image(url=game["image_url"])
+        score = calculate_score(game['guesses'], game['hint_index'], game['difficulty'])
         await ctx.send(embed=reveal_embed)
-        await ctx.send(f"🎉 Correct, {ctx.author.mention}! **Total Guesses: {game['guesses']} | Hints used: {game['hint_index']}**")
+        await ctx.send(f"🎉 Correct, {ctx.author.mention}! **Score: {score} | Total Guesses: {game['guesses']} | Hints used: {game['hint_index']}**")
         del games[user_id]
     else:
         await ctx.send(f"❌ Incorrect, {ctx.author.mention}! Try again. **(Guesses: {game['guesses']})**")
@@ -272,7 +296,7 @@ async def end(ctx):
         )
         reveal_embed.set_image(url=game["image_url"])
         await ctx.send(embed=reveal_embed)
-        await ctx.send(f"{ctx.author.mention}, Game over! The answer was **{answer}**. Better luck next time! **Total Guesses: {game['guesses']} | Hints used: {game['hint_index']}**")
+        await ctx.send(f"{ctx.author.mention}, Game over! The answer was **{answer}**. Better luck next time! No points awarded.")
     else:
         await ctx.send(f"{ctx.author.mention}, you don't have a game running.")
 
