@@ -132,19 +132,34 @@ pokemon_repo = PokemonRepository()
 # this keeps track of the active game for each user by their discord id
 games = {}
 
-# difficulty ranges based on generation
-DIFFICULTY_RANGES = {
-    "easy": (1, 151),    # gen 1
-    "medium": (1, 386),  # gen 1-3
-    "hard": (1, 1025),   # all gens
-}
 
-# base scores per difficulty
-DIFFICULTY_BASE_SCORES = {
-    "easy": 100,
-    "medium": 150,
-    "hard": 200,
-}
+# ------------------------------------------------------------
+# DifficultyService class
+# this owns the difficulty configuration and scoring logic
+# keeping it here means the bot command doesnt need to know
+# how ranges are defined or how scores are calculated
+# ------------------------------------------------------------
+class DifficultyService:
+
+    DIFFICULTY_RANGES = {
+        "easy": (1, 151),    # gen 1
+        "medium": (1, 386),  # gen 1-3
+        "hard": (1, 1025),   # all gens
+    }
+
+    DIFFICULTY_BASE_SCORES = {
+        "easy": 100,
+        "medium": 150,
+        "hard": 200,
+    }
+
+    # starts at the base score for the difficulty then subtracts
+    # 10 points per extra guess and 5 per hint used
+    def calculate_score(self, guesses: int, hints_used: int, difficulty: str) -> int:
+        score = self.DIFFICULTY_BASE_SCORES.get(difficulty, 100)
+        score -= (guesses - 1) * 10
+        score -= hints_used * 5
+        return max(score, 10)
 
 
 # ------------------------------------------------------------
@@ -241,16 +256,7 @@ class LeaderboardRepository:
 leaderboard_repo = LeaderboardRepository()
 leaderboard_repo.init_database()
 leaderboard_service = LeaderboardService()
-
-
-# this is the scoring logic
-# starts at the base score for the difficulty then subtracts
-# 10 points per extra guess and 5 per hint used
-def calculate_score(guesses, hints_used, difficulty="easy"):
-    score = DIFFICULTY_BASE_SCORES.get(difficulty, 100)
-    score -= (guesses - 1) * 10
-    score -= hints_used * 5
-    return max(score, 10)
+difficulty_service = DifficultyService()
 
 
 # this runs when the bot is ready and logged in
@@ -288,11 +294,11 @@ async def start(ctx, difficulty: str = "easy"):
         return
 
     difficulty = difficulty.lower()
-    if difficulty not in DIFFICULTY_RANGES:
+    if difficulty not in DifficultyService.DIFFICULTY_RANGES:
         await ctx.send(f"{ctx.author.mention}, invalid difficulty. Choose `easy`, `medium`, or `hard`.")
         return
 
-    poke_min, poke_max = DIFFICULTY_RANGES[difficulty]
+    poke_min, poke_max = DifficultyService.DIFFICULTY_RANGES[difficulty]
     poke_id = random.randint(poke_min, poke_max)
 
     async with aiohttp.ClientSession() as session:
@@ -391,7 +397,7 @@ async def guess(ctx, *, user_guess: str):
         )
         reveal_embed.set_image(url=game.image_url)
 
-        score = calculate_score(game.guesses, game.hint_index, game.difficulty)
+        score = difficulty_service.calculate_score(game.guesses, game.hint_index, game.difficulty)
 
         # save the score using the leaderboard repository
         leaderboard_repo.update_score(ctx.author.id, ctx.guild.id, score)
