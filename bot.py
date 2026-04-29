@@ -148,6 +148,42 @@ DIFFICULTY_BASE_SCORES = {
 
 
 # ------------------------------------------------------------
+# LeaderboardEntry class
+# this is a simple object that holds one row from the leaderboard
+# table instead of passing raw tuples around we wrap them in
+# this class so the code is easier to read
+# ------------------------------------------------------------
+class LeaderboardEntry:
+    def __init__(self, discord_user_id, server_id, high_score):
+        self.discord_user_id = discord_user_id
+        self.server_id = server_id
+        self.high_score = high_score
+
+
+# ------------------------------------------------------------
+# LeaderboardService class
+# this handles formatting the leaderboard into a discord embed
+# we pull this out of the bot command so the command doesnt
+# have to know anything about how the embed is built
+# ------------------------------------------------------------
+class LeaderboardService:
+
+    # takes a list of LeaderboardEntry objects and the server name
+    # and builds a discord embed to send back to the user
+    def format_leaderboard(self, entries, guild_name):
+        embed = discord.Embed(title=f"🏆 {guild_name} Pokémon Trivia Leaderboard", color=0xFFD700)
+
+        leaderboard_text = ""
+        for index, entry in enumerate(entries, start=1):
+            name = f"<@{entry.discord_user_id}>"
+            medal = "🥇" if index == 1 else "🥈" if index == 2 else "🥉" if index == 3 else f"**{index}.**"
+            leaderboard_text += f"{medal} {name}: `{entry.high_score} pts`\n"
+
+        embed.description = leaderboard_text
+        return embed
+
+
+# ------------------------------------------------------------
 # LeaderboardRepository class
 # this handles all database stuff for saving and reading scores
 # keeping this separate means the bot commands dont need to
@@ -185,7 +221,7 @@ class LeaderboardRepository:
         conn.commit()
         conn.close()
 
-    # gets the top 10 scores for a server
+    # gets the top 10 scores for a server and returns them as LeaderboardEntry objects
     def get_top_scores(self, server_id):
         conn = sqlite3.connect(self.DB_NAME)
         cursor = conn.cursor()
@@ -198,12 +234,13 @@ class LeaderboardRepository:
         """, (str(server_id),))
         rows = cursor.fetchall()
         conn.close()
-        return rows
+        return [LeaderboardEntry(discord_user_id=row[0], server_id=str(server_id), high_score=row[1]) for row in rows]
 
 
-# create the leaderboard repo instance and set up the db
+# create the leaderboard repo and service instances
 leaderboard_repo = LeaderboardRepository()
 leaderboard_repo.init_database()
+leaderboard_service = LeaderboardService()
 
 
 # this is the scoring logic
@@ -368,23 +405,17 @@ async def guess(ctx, *, user_guess: str):
 
 # this shows the top 10 leaderboard for the server
 # uses the leaderboard repository to get the scores
+# and the leaderboard service to format the embed
 @bot.command()
 async def leaderboard(ctx):
-    rows = leaderboard_repo.get_top_scores(ctx.guild.id)
+    entries = leaderboard_repo.get_top_scores(ctx.guild.id)
 
-    if not rows:
+    if not entries:
         await ctx.send("The leaderboard is empty! Start a game with `!start` to claim your spot.")
         return
 
-    embed = discord.Embed(title=f"🏆 {ctx.guild.name} Pokémon Trivia Leaderboard", color=0xFFD700)
-
-    leaderboard_text = ""
-    for index, (user_id, score) in enumerate(rows, start=1):
-        name = f"<@{user_id}>"
-        medal = "🥇" if index == 1 else "🥈" if index == 2 else "🥉" if index == 3 else f"**{index}.**"
-        leaderboard_text += f"{medal} {name}: `{score} pts`\n"
-
-    embed.description = leaderboard_text
+    # delegate embed building to the leaderboard service
+    embed = leaderboard_service.format_leaderboard(entries, ctx.guild.name)
     await ctx.send(embed=embed)
 
 
