@@ -263,6 +263,7 @@ async def guess(ctx, *, user_guess: str):
         )
         reveal_embed.set_image(url=game["image_url"])
         score = calculate_score(game['guesses'], game['hint_index'], game['difficulty'])
+        update_score(ctx.author.id, ctx.guild.id, score)
         await ctx.send(embed=reveal_embed)
         await ctx.send(f"🎉 Correct, {ctx.author.mention}! **Score: {score} | Total Guesses: {game['guesses']} | Hints used: {game['hint_index']}**")
         del games[user_id]
@@ -272,12 +273,37 @@ async def guess(ctx, *, user_guess: str):
 # this command will show the leaderboard
 @bot.command()
 async def leaderboard(ctx):
-    # for now, just testing an output, no query logic implimented yet
-    await ctx.send(
-        "🏆 **Pokémon Trivia Bot Leaderboard**\n"
-        "TESTING OUTPUT\n"
-        "This is just a placeholder for the queried results to be implimented"
-    )
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Get top 10 scores for this specific server
+    cursor.execute("""
+        SELECT discord_user_id, high_score 
+        FROM leaderboard 
+        WHERE server_id = ? 
+        ORDER BY high_score DESC 
+        LIMIT 10
+    """, (str(ctx.guild.id),))
+    
+    rows = cursor.fetchall()
+    conn.close()
+
+    if not rows:
+        await ctx.send("The leaderboard is empty! Start a game with `!start` to claim your spot.")
+        return
+
+    embed = discord.Embed(title=f"🏆 {ctx.guild.name} Pokémon Trivia Leaderboard", color=0xFFD700)
+    
+    leaderboard_text = ""
+    for index, (user_id, score) in enumerate(rows, start=1):
+        
+        name = f"<@{user_id}>"
+        
+        medal = "🥇" if index == 1 else "🥈" if index == 2 else "🥉" if index == 3 else f"**{index}.**"
+        leaderboard_text += f"{medal} {name}: `{score} pts`\n"
+
+    embed.description = leaderboard_text
+    await ctx.send(embed=embed)
 
 # this command ends the game and shows the answer
 @bot.command()
@@ -299,6 +325,22 @@ async def end(ctx):
         await ctx.send(f"{ctx.author.mention}, Game over! The answer was **{answer}**. Better luck next time! No points awarded.")
     else:
         await ctx.send(f"{ctx.author.mention}, you don't have a game running.")
+
+# Updates player score
+def update_score(user_id, server_id, new_score):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    
+    # Only saves the score if it's a new personal best
+    cursor.execute("""
+        INSERT INTO leaderboard (discord_user_id, server_id, high_score)
+        VALUES (?, ?, ?)
+        ON CONFLICT(discord_user_id, server_id) DO UPDATE SET
+        high_score = MAX(leaderboard.high_score, excluded.high_score)
+    """, (str(user_id), str(server_id), new_score))
+    
+    conn.commit()
+    conn.close()
 
 # this sets up the database before the bot starts
 init_database()
