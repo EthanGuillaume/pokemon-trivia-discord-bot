@@ -28,31 +28,116 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
 
-# this keeps track of the game for each user
-# it remembers the answer, the image, and how many guesses
+# ------------------------------------------------------------
+# GameState class
+# this holds all the data for one active game session
+# keeping it in its own class makes it easier to manage and
+# means the bot doesnt have to know about all the fields
+# ------------------------------------------------------------
+class GameState:
+    def __init__(self, answer, display_name, image_url, hints, difficulty):
+        self.answer = answer.lower()
+        self.display_name = display_name
+        self.image_url = image_url
+        self.hints = hints
+        self.difficulty = difficulty
+        self.guesses = 0
+        self.hint_index = 0
+
+
+# ------------------------------------------------------------
+# HintService class
+# this is responsible for building hints from pokemon data
+# and cleaning up text from the api
+# we separated this out because hint logic shouldnt live
+# inside the bot command handlers
+# ------------------------------------------------------------
+class HintService:
+
+    # this cleans up api text like generation-i into Generation I
+    def pretty_text(self, text):
+        if not text:
+            return "Unknown"
+        return text.replace("-", " ").title()
+
+    # this builds the list of hints in the order we want
+    def build_hints(self, pokemon_data, species_data):
+        pokemon_types = [entry["type"]["name"] for entry in pokemon_data.get("types", [])]
+        color = self.pretty_text(species_data.get("color", {}).get("name"))
+        generation = self.pretty_text(species_data.get("generation", {}).get("name"))
+        primary_type = self.pretty_text(pokemon_types[0]) if pokemon_types else "Unknown"
+        answer = pokemon_data["name"]
+
+        hints = [
+            f"Hint 1: this pokémon's main pokedex color is **{color}**.",
+            f"Hint 2: this pokémon was introduced in **{generation}**.",
+            f"Hint 3: this pokémon's primary type is **{primary_type}**.",
+            f"Hint 4: this pokémon starts with the letter **{answer[0].upper()}**." if answer else "Hint 4: no first-letter hint available.",
+            f"Hint 5: this pokémon's name has **{len(answer)}** letters.",
+        ]
+
+        return hints
+
+
+# ------------------------------------------------------------
+# PokemonRepository class
+# this is responsible for fetching pokemon data from the api
+# and building the silhouette image
+# we separated this so the bot command doesnt have to know
+# anything about how the data is fetched
+# ------------------------------------------------------------
+class PokemonRepository:
+
+    # fetches the main pokemon data like types and artwork
+    async def get_pokemon(self, session, poke_id):
+        async with session.get(f'https://pokeapi.co/api/v2/pokemon/{poke_id}') as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json()
+
+    # fetches the species data like color and generation for hints
+    async def get_species(self, session, poke_id):
+        async with session.get(f'https://pokeapi.co/api/v2/pokemon-species/{poke_id}') as resp:
+            if resp.status != 200:
+                return None
+            return await resp.json()
+
+    # this turns the pokemon artwork into a black silhouette using pillow
+    # the api returns transparent pngs so we just pull the alpha channel
+    # and put it on a black background
+    async def make_silhouette(self, session, image_url):
+        async with session.get(image_url) as resp:
+            if resp.status != 200:
+                return None
+            image_bytes = await resp.read()
+
+        image = Image.open(BytesIO(image_bytes)).convert("RGBA")
+        alpha_channel = image.getchannel("A")
+
+        silhouette = Image.new("RGBA", image.size, (0, 0, 0, 0))
+        silhouette.putalpha(alpha_channel)
+
+        output = BytesIO()
+        silhouette.save(output, format="PNG")
+        output.seek(0)
+        return output
+
+
+# ------------------------------------------------------------
+# create instances of each service so the bot can use them
+# ------------------------------------------------------------
+hint_service = HintService()
+pokemon_repo = PokemonRepository()
+
+# this keeps track of the active game for each user by their discord id
 games = {}
 
-# this is our database name to connect to, it wioll be our local SQLite db for saving users high scores 
-DB_NAME = "leaderboard.db"
-
-# this function initializes the table for score tracking if it is not yet initialized
-def init_database():
-    # make db connection
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-
-    # if the table doesnt exist yet, we make the table to store the discord username, server name, and their high score
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS leaderboard (
-            discord_user_id TEXT NOT NULL,
-            server_id TEXT NOT NULL,
-            high_score INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (discord_user_id, server_id)
-        )
-    """)
-
-    conn.commit()
-    conn.close()
+# difficulty ranges based on generation
+DIFFICULTY_RANGES = {
+    "easy": (1, 151),    # gen 1
+    "medium": (1, 386),  # gen 1-3
+    "hard": (1, 1025),   # all gens
+}
 
 # base scores per difficulty
 DIFFICULTY_BASE_SCORES = {
@@ -61,59 +146,74 @@ DIFFICULTY_BASE_SCORES = {
     "hard": 200,
 }
 
-# this is the logic function for getting the score from a round
-# starting from the difficulty base, every guess after the first is 10 points off, and every hint used is 5 points off
+
+# ------------------------------------------------------------
+# LeaderboardRepository class
+# this handles all database stuff for saving and reading scores
+# keeping this separate means the bot commands dont need to
+# know how the database works
+# ------------------------------------------------------------
+class LeaderboardRepository:
+
+    DB_NAME = "leaderboard.db"
+
+    # sets up the table if it doesnt exist yet
+    def init_database(self):
+        conn = sqlite3.connect(self.DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS leaderboard (
+                discord_user_id TEXT NOT NULL,
+                server_id TEXT NOT NULL,
+                high_score INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (discord_user_id, server_id)
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+    # saves the score only if its a new personal best
+    def update_score(self, user_id, server_id, new_score):
+        conn = sqlite3.connect(self.DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO leaderboard (discord_user_id, server_id, high_score)
+            VALUES (?, ?, ?)
+            ON CONFLICT(discord_user_id, server_id) DO UPDATE SET
+            high_score = MAX(leaderboard.high_score, excluded.high_score)
+        """, (str(user_id), str(server_id), new_score))
+        conn.commit()
+        conn.close()
+
+    # gets the top 10 scores for a server
+    def get_top_scores(self, server_id):
+        conn = sqlite3.connect(self.DB_NAME)
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT discord_user_id, high_score
+            FROM leaderboard
+            WHERE server_id = ?
+            ORDER BY high_score DESC
+            LIMIT 10
+        """, (str(server_id),))
+        rows = cursor.fetchall()
+        conn.close()
+        return rows
+
+
+# create the leaderboard repo instance and set up the db
+leaderboard_repo = LeaderboardRepository()
+leaderboard_repo.init_database()
+
+
+# this is the scoring logic
+# starts at the base score for the difficulty then subtracts
+# 10 points per extra guess and 5 per hint used
 def calculate_score(guesses, hints_used, difficulty="easy"):
     score = DIFFICULTY_BASE_SCORES.get(difficulty, 100)
     score -= (guesses - 1) * 10
     score -= hints_used * 5
     return max(score, 10)
-
-# this turns the pokemon artwork into a black silhouette
-async def make_silhouette(session, image_url):
-    async with session.get(image_url) as resp:
-        if resp.status != 200:
-            return None
-
-        image_bytes = await resp.read()
-    # here we use pillow to keep the original transparency and just swap the visible part of the artwork to black.
-    # luckily the api has transparant pngs so we don't have to do any fancy masking or anything, we can just take the alpha channel and apply it to a new black image.
-    image = Image.open(BytesIO(image_bytes)).convert("RGBA")
-    alpha_channel = image.getchannel("A")
-
-    silhouette = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    silhouette.putalpha(alpha_channel)
-
-    output = BytesIO()
-    silhouette.save(output, format="PNG")
-    output.seek(0)
-    return output
-
-
-# this cleans up api text like generation-i into Generation I
-def pretty_text(text):
-    if not text:
-        return "Unknown"
-    return text.replace("-", " ").title()
-
-
-# this sets up the hints in the order we want
-def build_hints(pokemon_data, species_data):
-    pokemon_types = [entry["type"]["name"] for entry in pokemon_data.get("types", [])]
-    color = pretty_text(species_data.get("color", {}).get("name"))
-    generation = pretty_text(species_data.get("generation", {}).get("name"))
-    primary_type = pretty_text(pokemon_types[0]) if pokemon_types else "Unknown"
-    answer = pokemon_data["name"]
-
-    hints = [
-        f"Hint 1: this pokémon's main pokedex color is **{color}**.",
-        f"Hint 2: this pokémon was introduced in **{generation}**.",
-        f"Hint 3: this pokémon's primary type is **{primary_type}**.",
-        f"Hint 4: this pokémon starts with the letter **{answer[0].upper()}**." if answer else "Hint 4: no first-letter hint available.",
-        f"Hint 5: this pokémon's name has **{len(answer)}** letters.",
-    ]
-
-    return hints
 
 
 # this runs when the bot is ready and logged in
@@ -125,12 +225,10 @@ async def on_ready():
 # this shows the user all the commands they can use
 @bot.command()
 async def help(ctx):
-    # make a simple help menu so users can see every command quickly
     embed = discord.Embed(
         title="Pokémon trivia commands",
         description="Here are the commands you can use in the game."
     )
-    # each field is one command with a short explanation
     embed.add_field(name="!start [difficulty]", value="start a new pokémon trivia game. difficulty can be `easy` (gen 1), `medium` (gen 1-3), or `hard` (all gens). defaults to `easy`.", inline=False)
     embed.add_field(name="!guess <name>", value="submit your guess for the current pokémon.", inline=False)
     embed.add_field(name="!hint", value="get the next hint for your current game.", inline=False)
@@ -140,18 +238,14 @@ async def help(ctx):
     await ctx.send(embed=embed)
 
 
-# difficulty ranges based on generation
-DIFFICULTY_RANGES = {
-    "easy": (1, 151),    # gen 1
-    "medium": (1, 386),  # gen 1-3
-    "hard": (1, 1025),   # all gens
-}
-
 # this command starts the game
+# it uses PokemonRepository to get the data and HintService to build hints
+# then stores a GameState object for the user
 @bot.command()
 async def start(ctx, difficulty: str = "easy"):
     user_id = ctx.author.id
-    # if a game is already running for this user, don't start a new one
+
+    # dont let them start a new game if one is already running
     if user_id in games:
         await ctx.send(f"{ctx.author.mention}, you already have a game running! Use `!end` to stop it.")
         return
@@ -163,64 +257,59 @@ async def start(ctx, difficulty: str = "easy"):
 
     poke_min, poke_max = DIFFICULTY_RANGES[difficulty]
     poke_id = random.randint(poke_min, poke_max)
+
     async with aiohttp.ClientSession() as session:
-        # this api is for the actual pokemon data like types and the image
-        async with session.get(f'https://pokeapi.co/api/v2/pokemon/{poke_id}') as pokemon_resp:
-            if pokemon_resp.status != 200:
-                await ctx.send("Failed to fetch pokémon data. Try again.")
-                return
+        # use the repository to fetch pokemon and species data
+        pokemon_data = await pokemon_repo.get_pokemon(session, poke_id)
+        if not pokemon_data:
+            await ctx.send("Failed to fetch pokémon data. Try again.")
+            return
 
-            pokemon_data = await pokemon_resp.json()
-        #this api is for the species data like color and generation, which we use for hints
-        async with session.get(f'https://pokeapi.co/api/v2/pokemon-species/{poke_id}') as species_resp:
-            if species_resp.status != 200:
-                await ctx.send("Failed to fetch pokémon hint data. Try again.")
-                return
+        species_data = await pokemon_repo.get_species(session, poke_id)
+        if not species_data:
+            await ctx.send("Failed to fetch pokémon hint data. Try again.")
+            return
 
-            species_data = await species_resp.json()
+        answer = pokemon_data['name']
 
-            answer = pokemon_data['name']
-            # get the pokemon's picture
-            image_url = pokemon_data['sprites']['other']['official-artwork']['front_default']
-            if not image_url:
-                # if there is no artwork, use the normal sprite
-                image_url = pokemon_data['sprites']['front_default']
+        # try the official artwork first, fall back to normal sprite
+        image_url = pokemon_data['sprites']['other']['official-artwork']['front_default']
+        if not image_url:
+            image_url = pokemon_data['sprites']['front_default']
 
-            if not image_url:
-                await ctx.send("Could not find artwork for this pokémon. Try again.")
-                return
+        if not image_url:
+            await ctx.send("Could not find artwork for this pokémon. Try again.")
+            return
 
-            silhouette_bytes = await make_silhouette(session, image_url)
-            if not silhouette_bytes:
-                await ctx.send("Could not build the silhouette image. Try again.")
-                return
+        # use the repository to build the silhouette
+        silhouette_bytes = await pokemon_repo.make_silhouette(session, image_url)
+        if not silhouette_bytes:
+            await ctx.send("Could not build the silhouette image. Try again.")
+            return
 
-            # build the list of hints before the game starts
-            hints = build_hints(pokemon_data, species_data)
+        # use the hint service to build the hint list
+        hints = hint_service.build_hints(pokemon_data, species_data)
 
-            # save the answer, image, and guesses for this user
-            games[user_id] = {
-                "answer": answer.lower(),
-                "display_name": pretty_text(answer),
-                "image_url": image_url,
-                "guesses": 0,
-                "hint_index": 0,
-                "hints": hints,
-                "difficulty": difficulty,
-            }
+        # create a GameState object and store it for this user
+        games[user_id] = GameState(
+            answer=answer,
+            display_name=hint_service.pretty_text(answer),
+            image_url=image_url,
+            hints=hints,
+            difficulty=difficulty,
+        )
 
-            # make a message with the picture
-            embed = discord.Embed(
-                title="Who's That Pokémon?",
-                description="Guess the Pokémon from the silhouette!"
-            )
-            silhouette_file = discord.File(silhouette_bytes, filename="silhouette.png")
-            embed.set_image(url="attachment://silhouette.png")
-            await ctx.send(file=silhouette_file, embed=embed)
-            await ctx.send(f"{ctx.author.mention}, your trivia game has started! Difficulty: **{difficulty.capitalize()}**. Use `!guess <name>` to answer, `!hint` for assistance, or `!end` to stop your game.")
+        embed = discord.Embed(
+            title="Who's That Pokémon?",
+            description="Guess the Pokémon from the silhouette!"
+        )
+        silhouette_file = discord.File(silhouette_bytes, filename="silhouette.png")
+        embed.set_image(url="attachment://silhouette.png")
+        await ctx.send(file=silhouette_file, embed=embed)
+        await ctx.send(f"{ctx.author.mention}, your trivia game has started! Difficulty: **{difficulty.capitalize()}**. Use `!guess <name>` to answer, `!hint` for assistance, or `!end` to stop your game.")
 
 
-# this gives the next hint to the user
+# this gives the user their next hint from the GameState
 @bot.command()
 async def hint(ctx):
     user_id = ctx.author.id
@@ -230,120 +319,95 @@ async def hint(ctx):
         await ctx.send(f"{ctx.author.mention}, you don't have a game running. Start one with `!start`.")
         return
 
-    # stop once the user has already seen every hint
-    if game["hint_index"] >= len(game["hints"]):
+    # all hints have been used
+    if game.hint_index >= len(game.hints):
         await ctx.send(f"{ctx.author.mention}, you already used all the hints for this pokémon.")
         return
 
-    # send the next hint and move the counter forward
-    next_hint = game["hints"][game["hint_index"]]
-    game["hint_index"] += 1
+    # grab the next hint and move the index forward
+    next_hint = game.hints[game.hint_index]
+    game.hint_index += 1
     await ctx.send(f"{ctx.author.mention}, {next_hint}")
 
 
-# this command lets you guess the pokemon
+# this lets the user guess the pokemon name
+# uses the GameState to track guesses and check the answer
 @bot.command()
 async def guess(ctx, *, user_guess: str):
     user_id = ctx.author.id
-    # get the game for this user
     game = games.get(user_id)
+
     if not game:
         await ctx.send(f"{ctx.author.mention}, you don't have a game running. Start one with `!start`.")
         return
-    # add 1 to the number of guesses
-    game["guesses"] += 1
-    # normalize guess and answer for comparison (remove spaces and hyphens, lowercase)
+
+    game.guesses += 1
+
+    # strip spaces and hyphens so things like mr-mime and mr mime both work
     def normalize(text):
         return text.lower().replace(" ", "").replace("-", "")
-    if normalize(user_guess) == normalize(game["answer"]):
-        # reveal the normal artwork once the user gets it right
+
+    if normalize(user_guess) == normalize(game.answer):
         reveal_embed = discord.Embed(
             title="Correct!",
-            description=f"The answer was **{game['display_name']}**."
+            description=f"The answer was **{game.display_name}**."
         )
-        reveal_embed.set_image(url=game["image_url"])
-        score = calculate_score(game['guesses'], game['hint_index'], game['difficulty'])
-        update_score(ctx.author.id, ctx.guild.id, score)
+        reveal_embed.set_image(url=game.image_url)
+
+        score = calculate_score(game.guesses, game.hint_index, game.difficulty)
+
+        # save the score using the leaderboard repository
+        leaderboard_repo.update_score(ctx.author.id, ctx.guild.id, score)
+
         await ctx.send(embed=reveal_embed)
-        await ctx.send(f"🎉 Correct, {ctx.author.mention}! **Score: {score} | Total Guesses: {game['guesses']} | Hints used: {game['hint_index']}**")
+        await ctx.send(f"🎉 Correct, {ctx.author.mention}! **Score: {score} | Total Guesses: {game.guesses} | Hints used: {game.hint_index}**")
         del games[user_id]
     else:
-        await ctx.send(f"❌ Incorrect, {ctx.author.mention}! Try again. **(Guesses: {game['guesses']})**")
+        await ctx.send(f"❌ Incorrect, {ctx.author.mention}! Try again. **(Guesses: {game.guesses})**")
 
-# this command will show the leaderboard
+
+# this shows the top 10 leaderboard for the server
+# uses the leaderboard repository to get the scores
 @bot.command()
 async def leaderboard(ctx):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Get top 10 scores for this specific server
-    cursor.execute("""
-        SELECT discord_user_id, high_score 
-        FROM leaderboard 
-        WHERE server_id = ? 
-        ORDER BY high_score DESC 
-        LIMIT 10
-    """, (str(ctx.guild.id),))
-    
-    rows = cursor.fetchall()
-    conn.close()
+    rows = leaderboard_repo.get_top_scores(ctx.guild.id)
 
     if not rows:
         await ctx.send("The leaderboard is empty! Start a game with `!start` to claim your spot.")
         return
 
     embed = discord.Embed(title=f"🏆 {ctx.guild.name} Pokémon Trivia Leaderboard", color=0xFFD700)
-    
+
     leaderboard_text = ""
     for index, (user_id, score) in enumerate(rows, start=1):
-        
         name = f"<@{user_id}>"
-        
         medal = "🥇" if index == 1 else "🥈" if index == 2 else "🥉" if index == 3 else f"**{index}.**"
         leaderboard_text += f"{medal} {name}: `{score} pts`\n"
 
     embed.description = leaderboard_text
     await ctx.send(embed=embed)
 
-# this command ends the game and shows the answer
+
+# this ends the current game and reveals the answer without giving points
 @bot.command()
 async def end(ctx):
     user_id = ctx.author.id
     game = games.get(user_id)
+
     if game:
-        answer = game["display_name"]
-        # remove the game first so the user can start a new one right away
+        answer = game.display_name
         del games[user_id]
 
-        # show the real image when the game is ended
         reveal_embed = discord.Embed(
             title="Game Ended",
             description=f"The pokémon was **{answer}**."
         )
-        reveal_embed.set_image(url=game["image_url"])
+        reveal_embed.set_image(url=game.image_url)
         await ctx.send(embed=reveal_embed)
         await ctx.send(f"{ctx.author.mention}, Game over! The answer was **{answer}**. Better luck next time! No points awarded.")
     else:
         await ctx.send(f"{ctx.author.mention}, you don't have a game running.")
 
-# Updates player score
-def update_score(user_id, server_id, new_score):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    
-    # Only saves the score if it's a new personal best
-    cursor.execute("""
-        INSERT INTO leaderboard (discord_user_id, server_id, high_score)
-        VALUES (?, ?, ?)
-        ON CONFLICT(discord_user_id, server_id) DO UPDATE SET
-        high_score = MAX(leaderboard.high_score, excluded.high_score)
-    """, (str(user_id), str(server_id), new_score))
-    
-    conn.commit()
-    conn.close()
-
-# this sets up the database before the bot starts
-init_database()
 
 # this starts the bot
 bot.run(token, log_handler=handler, log_level=logging.DEBUG)
