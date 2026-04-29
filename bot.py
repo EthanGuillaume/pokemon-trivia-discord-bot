@@ -231,7 +231,7 @@ class LeaderboardRepository:
             INSERT INTO leaderboard (discord_user_id, server_id, high_score)
             VALUES (?, ?, ?)
             ON CONFLICT(discord_user_id, server_id) DO UPDATE SET
-            high_score = MAX(leaderboard.high_score, excluded.high_score)
+            high_score = leaderboard.high_score + excluded.high_score
         """, (str(user_id), str(server_id), new_score))
         conn.commit()
         conn.close()
