@@ -9,6 +9,8 @@ import aiohttp
 from io import BytesIO
 from PIL import Image
 import sqlite3
+import re
+import unicodedata
 
 
 # this loads the secret token for the bot from a file
@@ -169,10 +171,10 @@ class DifficultyService:
 # this class so the code is easier to read
 # ------------------------------------------------------------
 class LeaderboardEntry:
-    def __init__(self, discord_user_id, server_id, high_score):
+    def __init__(self, discord_user_id, server_id, total_score):
         self.discord_user_id = discord_user_id
         self.server_id = server_id
-        self.high_score = high_score
+        self.total_score = total_score
 
 
 # ------------------------------------------------------------
@@ -192,7 +194,7 @@ class LeaderboardService:
         for index, entry in enumerate(entries, start=1):
             name = f"<@{entry.discord_user_id}>"
             medal = "🥇" if index == 1 else "🥈" if index == 2 else "🥉" if index == 3 else f"**{index}.**"
-            leaderboard_text += f"{medal} {name}: `{entry.high_score} pts`\n"
+            leaderboard_text += f"{medal} {name}: `{entry.total_score} pts`\n"
 
         embed.description = leaderboard_text
         return embed
@@ -216,7 +218,7 @@ class LeaderboardRepository:
             CREATE TABLE IF NOT EXISTS leaderboard (
                 discord_user_id TEXT NOT NULL,
                 server_id TEXT NOT NULL,
-                high_score INTEGER NOT NULL DEFAULT 0,
+                total_score INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (discord_user_id, server_id)
             )
         """)
@@ -228,10 +230,10 @@ class LeaderboardRepository:
         conn = sqlite3.connect(self.DB_NAME)
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO leaderboard (discord_user_id, server_id, high_score)
+            INSERT INTO leaderboard (discord_user_id, server_id, total_score)
             VALUES (?, ?, ?)
             ON CONFLICT(discord_user_id, server_id) DO UPDATE SET
-            high_score = leaderboard.high_score + excluded.high_score
+            total_score = leaderboard.total_score + excluded.total_score
         """, (str(user_id), str(server_id), new_score))
         conn.commit()
         conn.close()
@@ -241,10 +243,10 @@ class LeaderboardRepository:
         conn = sqlite3.connect(self.DB_NAME)
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT discord_user_id, high_score
+            SELECT discord_user_id, total_score
             FROM leaderboard
             WHERE server_id = ?
-            ORDER BY high_score DESC
+            ORDER BY total_score DESC
             LIMIT 10
         """, (str(server_id),))
         rows = cursor.fetchall()
