@@ -1,6 +1,4 @@
 # this brings in the stuff we need to make the bot work
-from pydoc import text
-
 import discord
 from dotenv import load_dotenv
 from discord.ext import commands
@@ -31,13 +29,6 @@ intents.message_content = True
 # this makes the bot listen for commands that start with !
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
-# used for converting characters and removing any non basic ascii characters, also handles case sensitivity
-def normalize_text(text):
-    if not text:
-        return ""
-    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
-    return re.sub(r'[^a-z0-9]', '', text.lower())
-
 
 # ------------------------------------------------------------
 # GameState class
@@ -48,13 +39,21 @@ def normalize_text(text):
 class GameState:
     def __init__(self, pokemon_name, species_name, display_name, image_url, hints, difficulty):
         self.answer = species_name.lower()
-        self.answers = [pokemon_name.lower(), species_name.lower()] #a list of correct answers, for certain forms or variations of names
+        self.answers = [pokemon_name.lower(), species_name.lower()] # a list of correct answers, for certain forms or variations of names
         self.display_name = display_name
         self.image_url = image_url
         self.hints = hints
         self.difficulty = difficulty
         self.guesses = 0
         self.hint_index = 0
+
+    # strips spaces, hyphens, accents, and normalizes case
+    # so guesses like mr mime, Mr. Mime, and flabebe all match correctly
+    def normalize(self, text):
+        if not text:
+            return ""
+        text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+        return re.sub(r'[^a-z0-9]', '', text.lower())
 
 
 # ------------------------------------------------------------
@@ -263,7 +262,7 @@ class LeaderboardRepository:
         """, (str(server_id),))
         rows = cursor.fetchall()
         conn.close()
-        return [LeaderboardEntry(discord_user_id=row[0], server_id=str(server_id), high_score=row[1]) for row in rows]
+        return [LeaderboardEntry(discord_user_id=row[0], server_id=str(server_id), total_score=row[1]) for row in rows]
 
 
 # create the leaderboard repo and service instances
@@ -408,16 +407,8 @@ async def guess(ctx, *, user_guess: str):
 
     game.guesses += 1
 
-    normalized_user_guess = normalize_text(user_guess)
-
-    # checks if the guess is any of the possible correct answers (for varying forms or names)
-    is_correct = False
-    for a in game.answers:
-        if normalize_text(a) == normalized_user_guess:
-            is_correct = True
-            break
-
-    if is_correct:
+    # checks if the guess matches any of the valid answers (handles forms, accents, spacing)
+    if any(game.normalize(user_guess) == game.normalize(a) for a in game.answers):
         reveal_embed = discord.Embed(
             title="Correct!",
             description=f"The answer was **{game.display_name}**."
