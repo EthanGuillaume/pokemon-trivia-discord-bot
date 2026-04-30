@@ -1,4 +1,6 @@
 # this brings in the stuff we need to make the bot work
+from pydoc import text
+
 import discord
 from dotenv import load_dotenv
 from discord.ext import commands
@@ -29,6 +31,13 @@ intents.message_content = True
 # this makes the bot listen for commands that start with !
 bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 
+# used for converting characters and removing any non basic ascii characters, also handles case sensitivity
+def normalize_text(text):
+    if not text:
+        return ""
+    text = unicodedata.normalize('NFKD', text).encode('ascii', 'ignore').decode('utf-8')
+    return re.sub(r'[^a-z0-9]', '', text.lower())
+
 
 # ------------------------------------------------------------
 # GameState class
@@ -37,8 +46,9 @@ bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
 # means the bot doesnt have to know about all the fields
 # ------------------------------------------------------------
 class GameState:
-    def __init__(self, answer, display_name, image_url, hints, difficulty):
-        self.answer = answer.lower()
+    def __init__(self, pokemon_name, species_name, display_name, image_url, hints, difficulty):
+        self.answer = species_name.lower()
+        self.answers = [pokemon_name.lower(), species_name.lower()] #a list of correct answers, for certain forms or variations of names
         self.display_name = display_name
         self.image_url = image_url
         self.hints = hints
@@ -68,7 +78,9 @@ class HintService:
         color = self.pretty_text(species_data.get("color", {}).get("name"))
         generation = self.pretty_text(species_data.get("generation", {}).get("name"))
         primary_type = self.pretty_text(pokemon_types[0]) if pokemon_types else "Unknown"
-        answer = pokemon_data["name"]
+
+        #answer = pokemon_data["name"] 
+        answer = species_data["name"] #using species name helps with consistency in answering
 
         hints = [
             f"Hint 1: this pokémon's main pokedex color is **{color}**.",
@@ -303,6 +315,13 @@ async def start(ctx, difficulty: str = "easy"):
     poke_min, poke_max = DifficultyService.DIFFICULTY_RANGES[difficulty]
     poke_id = random.randint(poke_min, poke_max)
 
+    # TEMPORARY EDGE CASE TESTING
+    # poke_id = 122 # mr mime (Mr. Mime)
+    # poke_id = 669 # flabebe (Flabébé)
+    # poke_id = 386 # deoxys (deoxys-normal)
+    # poke_id = 778 # mimikyu (mimikyu-disguised)
+
+
     async with aiohttp.ClientSession() as session:
         # use the repository to fetch pokemon and species data
         pokemon_data = await pokemon_repo.get_pokemon(session, poke_id)
@@ -337,8 +356,9 @@ async def start(ctx, difficulty: str = "easy"):
 
         # create a GameState object and store it for this user
         games[user_id] = GameState(
-            answer=answer,
-            display_name=hint_service.pretty_text(answer),
+            pokemon_name = pokemon_data["name"],
+            species_name = species_data["name"],
+            display_name=hint_service.pretty_text(species_data["name"]),
             image_url=image_url,
             hints=hints,
             difficulty=difficulty,
@@ -388,11 +408,16 @@ async def guess(ctx, *, user_guess: str):
 
     game.guesses += 1
 
-    # strip spaces and hyphens so things like mr-mime and mr mime both work
-    def normalize(text):
-        return text.lower().replace(" ", "").replace("-", "")
+    normalized_user_guess = normalize_text(user_guess)
 
-    if normalize(user_guess) == normalize(game.answer):
+    # checks if the guess is any of the possible correct answers (for varying forms or names)
+    is_correct = False
+    for a in game.answers:
+        if normalize_text(a) == normalized_user_guess:
+            is_correct = True
+            break
+
+    if is_correct:
         reveal_embed = discord.Embed(
             title="Correct!",
             description=f"The answer was **{game.display_name}**."
